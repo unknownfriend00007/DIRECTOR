@@ -2,14 +2,26 @@ import gradio as gr
 import os
 import tempfile
 import re
+import logging
+from datetime import datetime
+
+# Setup comprehensive logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Create temp directory
 TEMP_DIR = tempfile.mkdtemp()
 OUTPUT_DIR = os.path.join(TEMP_DIR, "downloads")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+logger.info(f"Temp directory created: {TEMP_DIR}")
+logger.info(f"Output directory: {OUTPUT_DIR}")
+
 def search_youtube(query, max_results=15):
-    """Search YouTube using yt_dlp Python API with cookies"""
+    """Search YouTube using yt_dlp Python API"""
+    logger.info(f"=== SEARCH STARTED ===")
+    logger.info(f"Query: {query}")
+    
     try:
         import yt_dlp
         
@@ -20,18 +32,13 @@ def search_youtube(query, max_results=15):
             'skip_download': True,
         }
         
-        # Add cookies from environment variable
-        cookies_content = os.environ.get('YOUTUBE_COOKIES')
-        if cookies_content:
-            cookies_file = os.path.join(TEMP_DIR, 'cookies.txt')
-            with open(cookies_file, 'w') as f:
-                f.write(cookies_content)
-            ydl_opts['cookiefile'] = cookies_file
+        logger.info(f"Search options: {ydl_opts}")
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             search_result = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
         
         if not search_result or 'entries' not in search_result:
+            logger.warning("No results found in search")
             return None, "❌ No results found."
         
         videos = []
@@ -47,12 +54,15 @@ def search_youtube(query, max_results=15):
                     'id': entry.get('id', '')
                 })
         
+        logger.info(f"Found {len(videos)} videos")
+        
         if not videos:
             return None, "❌ No valid results found."
         
         return videos, f"✅ Found {len(videos)} videos"
         
     except Exception as e:
+        logger.error(f"Search error: {str(e)}", exc_info=True)
         return None, f"❌ Search error: {str(e)[:200]}"
 
 def format_duration(seconds):
@@ -86,6 +96,9 @@ def parse_timestamp(timestamp_str):
 
 def parse_timestamps(text):
     """Parse multiple timestamp ranges"""
+    logger.info(f"=== PARSING TIMESTAMPS ===")
+    logger.info(f"Raw input: {text}")
+    
     lines = text.strip().split('\n')
     clips = []
     
@@ -100,6 +113,8 @@ def parse_timestamps(text):
             start_sec = parse_timestamp(start_str)
             end_sec = parse_timestamp(end_str)
             
+            logger.info(f"Parsed: {start_str} ({start_sec}s) - {end_str} ({end_sec}s)")
+            
             if start_sec is not None and end_sec is not None and start_sec < end_sec:
                 clips.append({
                     'start': start_str,
@@ -108,63 +123,105 @@ def parse_timestamps(text):
                     'end_sec': end_sec
                 })
     
+    logger.info(f"Total clips parsed: {len(clips)}")
     return clips
 
 def download_clip(video_url, start_time, end_time, output_name, quality, crop_vertical):
-    """Download a specific clip - DIAGNOSTIC VERSION"""
+    """Download a specific clip - MAXIMUM LOGGING VERSION"""
+    logger.info(f"\n{'='*80}")
+    logger.info(f"=== DOWNLOAD STARTED ===")
+    logger.info(f"{'='*80}")
+    logger.info(f"Video URL: {video_url}")
+    logger.info(f"Start time: {start_time} seconds")
+    logger.info(f"End time: {end_time} seconds")
+    logger.info(f"Duration: {end_time - start_time} seconds")
+    logger.info(f"Output name: {output_name}")
+    logger.info(f"Quality: {quality}")
+    logger.info(f"Crop enabled: {crop_vertical}")
+    
     try:
         import yt_dlp
         
         output_path = os.path.join(OUTPUT_DIR, f"{output_name}.mp4")
+        logger.info(f"Output path: {output_path}")
         
-        # SIMPLIFIED - Testing basic download first
+        # SIMPLE, ROBUST OPTIONS
         ydl_opts = {
-            'format': 'best[height<=720]',  # Simpler format selection
+            'format': f'best[height<={quality}]/best',
             'outtmpl': output_path,
-            'verbose': True,  # Show what's happening
+            'verbose': True,
+            'no_warnings': False,
             'download_ranges': yt_dlp.utils.download_range_func(None, [(start_time, end_time)]),
-            'force_keyframes_at_cuts': True,  # Better timestamp cutting
+            'force_keyframes_at_cuts': True,
         }
         
-        # Add cookies
+        # Add cookies if available
         cookies_content = os.environ.get('YOUTUBE_COOKIES')
         if cookies_content:
+            logger.info("Using cookies from environment")
             cookies_file = os.path.join(TEMP_DIR, 'cookies.txt')
             with open(cookies_file, 'w') as f:
                 f.write(cookies_content)
             ydl_opts['cookiefile'] = cookies_file
+        else:
+            logger.warning("No cookies found in environment")
         
-        # Crop only if enabled and basic download works
+        # Add crop if requested
         if crop_vertical:
+            logger.info("Adding vertical crop filter")
             ydl_opts['postprocessor_args'] = {
                 'ffmpeg': ['-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920']
             }
         
-        print(f"Downloading: {video_url}")
-        print(f"Time range: {start_time}s to {end_time}s")
+        logger.info(f"yt-dlp options: {ydl_opts}")
+        logger.info("Starting download...")
         
+        # Download
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([video_url])
+            info = ydl.extract_info(video_url, download=True)
+            logger.info(f"Video title: {info.get('title', 'Unknown')}")
+            logger.info(f"Video duration: {info.get('duration', 'Unknown')} seconds")
         
-        # Check if file was created
+        logger.info("Download command completed")
+        
+        # Check for output file
+        logger.info(f"Checking for output file: {output_path}")
+        
         if os.path.exists(output_path):
             file_size = os.path.getsize(output_path)
+            logger.info(f"✅ SUCCESS! File created: {output_path}")
+            logger.info(f"File size: {file_size} bytes ({file_size // 1024}KB)")
             return output_path, f"✅ Downloaded ({file_size // 1024}KB)"
         
-        # Check for files with similar names
-        for filename in os.listdir(OUTPUT_DIR):
-            if output_name in filename:
+        # Check directory for any files
+        logger.info(f"Checking directory: {OUTPUT_DIR}")
+        all_files = os.listdir(OUTPUT_DIR)
+        logger.info(f"Files in directory: {all_files}")
+        
+        # Look for similar filenames
+        for filename in all_files:
+            if output_name in filename or filename.endswith('.mp4'):
                 full_path = os.path.join(OUTPUT_DIR, filename)
                 file_size = os.path.getsize(full_path)
+                logger.info(f"✅ Found file: {filename} ({file_size} bytes)")
                 return full_path, f"✅ Downloaded as {filename} ({file_size // 1024}KB)"
         
+        logger.error("❌ No output file found!")
         return None, "❌ Failed - no output file created"
             
     except Exception as e:
+        logger.error(f"{'='*80}")
+        logger.error(f"=== DOWNLOAD FAILED ===")
+        logger.error(f"{'='*80}")
+        logger.error(f"Exception type: {type(e).__name__}")
+        logger.error(f"Exception message: {str(e)}")
+        
         import traceback
-        error_trace = traceback.format_exc()
-        print(f"ERROR TRACE:\n{error_trace}")  # Shows in Render logs
+        full_trace = traceback.format_exc()
+        logger.error(f"Full traceback:\n{full_trace}")
+        
         return None, f"❌ Error: {str(e)}"
+
 # Global state
 search_results = []
 selected_video = None
@@ -201,14 +258,21 @@ def select_video_handler(evt: gr.SelectData):
     """Handle video selection from table"""
     global selected_video, search_results
     
+    logger.info(f"=== VIDEO SELECTED ===")
+    
     try:
         index = evt.index[0]
+        logger.info(f"Selected index: {index}")
+        
         if 0 <= index < len(search_results):
             selected_video = search_results[index]
             
             video_id = selected_video.get('id', '')
             full_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else selected_video.get('url', '')
             selected_video['url'] = full_url
+            
+            logger.info(f"Selected video: {selected_video['title']}")
+            logger.info(f"Video URL: {full_url}")
             
             info = f"""### 📹 Selected Video
 
@@ -227,7 +291,7 @@ Format: `2:30-3:15` (one per line)
             
             return info, gr.update(visible=False), gr.update(visible=True), ""
     except Exception as e:
-        print(f"Selection error: {e}")
+        logger.error(f"Selection error: {e}", exc_info=True)
     
     return "❌ Selection failed", gr.update(visible=True), gr.update(visible=False), ""
 
@@ -235,18 +299,32 @@ def process_download(timestamps_text, clip_name_prefix, quality, crop_vertical):
     """Process and download all clips"""
     global selected_video
     
+    logger.info(f"\n{'='*80}")
+    logger.info(f"=== PROCESSING DOWNLOAD REQUEST ===")
+    logger.info(f"{'='*80}")
+    
     if selected_video is None:
+        logger.warning("No video selected")
         return "❌ No video selected", []
     
+    logger.info(f"Video: {selected_video['title']}")
+    logger.info(f"URL: {selected_video['url']}")
+    
     if not timestamps_text or timestamps_text.strip() == "":
+        logger.warning("No timestamps provided")
         return "❌ Please enter timestamps", []
     
     if not clip_name_prefix or clip_name_prefix.strip() == "":
         clip_name_prefix = "clip"
     
+    logger.info(f"Clip name prefix: {clip_name_prefix}")
+    logger.info(f"Quality: {quality}")
+    logger.info(f"Crop vertical: {crop_vertical}")
+    
     clips = parse_timestamps(timestamps_text)
     
     if not clips:
+        logger.warning("No valid timestamps parsed")
         return "❌ No valid timestamps. Use format: 2:30-3:15 (one per line)", []
     
     status_lines = [f"🎬 Processing {len(clips)} clips from:\n{selected_video['title']}\n"]
@@ -256,10 +334,12 @@ def process_download(timestamps_text, clip_name_prefix, quality, crop_vertical):
         clip_filename = f"{clip_name_prefix}_{i}"
         status_lines.append(f"\n⏳ Clip {i}/{len(clips)}: {clip['start']}-{clip['end']}...")
         
+        logger.info(f"\n--- Processing clip {i}/{len(clips)} ---")
+        
         file_path, msg = download_clip(
             selected_video['url'],
-            clip['start_sec'],  # ✅ FIXED - now using seconds (int)
-            clip['end_sec'],    # ✅ FIXED - now using seconds (int)
+            clip['start_sec'],
+            clip['end_sec'],
             clip_filename,
             quality,
             crop_vertical
@@ -269,9 +349,14 @@ def process_download(timestamps_text, clip_name_prefix, quality, crop_vertical):
         
         if file_path and os.path.exists(file_path):
             downloaded_files.append(file_path)
+            logger.info(f"✅ Clip {i} successful: {file_path}")
+        else:
+            logger.error(f"❌ Clip {i} failed")
     
     status_lines.append(f"\n\n✅ Successfully downloaded {len(downloaded_files)}/{len(clips)} clips!")
     status_lines.append(f"\n💾 Download files immediately - they will be deleted when session ends.")
+    
+    logger.info(f"=== DOWNLOAD COMPLETE: {len(downloaded_files)}/{len(clips)} successful ===")
     
     return "\n".join(status_lines), downloaded_files
 
@@ -286,7 +371,7 @@ with gr.Blocks(title="YouTube Clip Finder", theme=gr.themes.Soft()) as app:
     # 🎬 YouTube Clip Finder & Downloader
     ### Search YouTube → Select Video → Enter Timestamps → Download Clips
     
-    ⚠️ **Setup Required:** Add your YouTube cookies as environment variable `YOUTUBE_COOKIES` to bypass bot detection.
+    ⚠️ **All activity is logged to Render logs for debugging**
     """)
     
     with gr.Column(visible=True) as search_page:
@@ -372,11 +457,12 @@ with gr.Blocks(title="YouTube Clip Finder", theme=gr.themes.Soft()) as app:
     - **Multiple clips:** Enter one per line
     - **Quality:** 720p recommended (good balance)
     - **Vertical crop:** Enable for TikTok/Instagram Reels/YouTube Shorts
-    - **Download immediately:** Files are temporary and deleted when session ends
+    - **Check Render logs** if downloads fail (Dashboard → Logs tab)
     """)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
+    logger.info(f"Starting app on port {port}")
     app.launch(
         server_name="0.0.0.0",
         server_port=port,
