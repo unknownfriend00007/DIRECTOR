@@ -1,10 +1,7 @@
 import gradio as gr
-import subprocess
 import os
-import json
 import tempfile
 import re
-from pathlib import Path
 
 # Create temp directory
 TEMP_DIR = tempfile.mkdtemp()
@@ -12,51 +9,43 @@ OUTPUT_DIR = os.path.join(TEMP_DIR, "downloads")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def search_youtube(query, max_results=15):
-    """Search YouTube and return video list"""
+    """Search YouTube using yt_dlp Python API"""
     try:
-        cmd = [
-            'yt-dlp',
-            '--dump-json',
-            '--skip-download',
-            '--no-warnings',
-            '--quiet',
-            f'ytsearch{max_results}:{query}'
-        ]
+        import yt_dlp
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'skip_download': True,
+        }
         
-        if result.returncode != 0:
-            return None, "❌ Search failed. Try a different query."
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            search_result = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
+        
+        if not search_result or 'entries' not in search_result:
+            return None, "❌ No results found."
         
         videos = []
-        lines = result.stdout.strip().split('\n')
-        
-        for line in lines:
-            if not line.strip():
-                continue
-            try:
-                data = json.loads(line)
+        for entry in search_result['entries']:
+            if entry:
                 videos.append({
-                    'title': data.get('title', 'No title')[:100],
-                    'url': data.get('webpage_url', ''),
-                    'duration': data.get('duration', 0),
-                    'view_count': data.get('view_count', 0),
-                    'thumbnail': data.get('thumbnail', ''),
-                    'uploader': data.get('uploader', 'Unknown')[:50],
-                    'id': data.get('id', '')
+                    'title': entry.get('title', 'No title')[:100],
+                    'url': entry.get('url', ''),
+                    'duration': entry.get('duration', 0),
+                    'view_count': entry.get('view_count', 0),
+                    'thumbnail': entry.get('thumbnail', ''),
+                    'uploader': entry.get('uploader', 'Unknown')[:50],
+                    'id': entry.get('id', '')
                 })
-            except json.JSONDecodeError:
-                continue
         
         if not videos:
-            return None, "❌ No results found."
+            return None, "❌ No valid results found."
         
         return videos, f"✅ Found {len(videos)} videos"
         
-    except subprocess.TimeoutExpired:
-        return None, "❌ Search timed out. Try again."
     except Exception as e:
-        return None, f"❌ Error: {str(e)}"
+        return None, f"❌ Search error: {str(e)[:200]}"
 
 def format_duration(seconds):
     """Convert seconds to MM:SS format"""
@@ -114,38 +103,38 @@ def parse_timestamps(text):
     return clips
 
 def download_clip(video_url, start_time, end_time, output_name, quality, crop_vertical):
-    """Download a specific clip from video"""
+    """Download a specific clip using yt_dlp Python API"""
     try:
+        import yt_dlp
+        
         output_path = os.path.join(OUTPUT_DIR, f"{output_name}.mp4")
         
-        cmd = [
-            'yt-dlp',
-            video_url,
-            '--download-sections', f'*{start_time}-{end_time}',
-            '-f', f'bestvideo[height<={quality}]+bestaudio/best[height<={quality}]',
-            '--merge-output-format', 'mp4',
-            '-o', output_path,
-            '--no-warnings',
-            '--quiet'
-        ]
+        # Build options
+        ydl_opts = {
+            'format': f'bestvideo[height<={quality}]+bestaudio/best[height<={quality}]',
+            'outtmpl': output_path,
+            'quiet': True,
+            'no_warnings': True,
+            'merge_output_format': 'mp4',
+            'download_ranges': yt_dlp.utils.download_range_func(None, [(start_time, end_time)]),
+        }
         
+        # Add crop postprocessing if requested
         if crop_vertical:
-            cmd.extend([
-                '--postprocessor-args',
-                'ffmpeg:-vf scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920'
-            ])
+            ydl_opts['postprocessor_args'] = {
+                'ffmpeg': ['-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920']
+            }
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
         
-        if result.returncode == 0 and os.path.exists(output_path):
+        if os.path.exists(output_path):
             return output_path, "✅ Downloaded"
         else:
-            return None, "❌ Failed"
+            return None, "❌ Failed - file not created"
             
-    except subprocess.TimeoutExpired:
-        return None, "❌ Timeout"
     except Exception as e:
-        return None, f"❌ Error: {str(e)}"
+        return None, f"❌ Error: {str(e)[:100]}"
 
 # Global state
 search_results = []
@@ -188,6 +177,11 @@ def select_video_handler(evt: gr.SelectData):
         if 0 <= index < len(search_results):
             selected_video = search_results[index]
             
+            # Build full YouTube URL
+            video_id = selected_video.get('id', '')
+            full_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else selected_video.get('url', '')
+            selected_video['url'] = full_url
+            
             info = f"""### 📹 Selected Video
 
 **{selected_video['title']}**
@@ -195,7 +189,7 @@ def select_video_handler(evt: gr.SelectData):
 - **Duration:** {format_duration(selected_video['duration'])}
 - **Views:** {format_views(selected_video['view_count'])}
 - **Uploader:** {selected_video['uploader']}
-- **Watch:** [{selected_video['url']}]({selected_video['url']})
+- **Watch:** [Open on YouTube]({full_url})
 
 ---
 
@@ -318,7 +312,7 @@ with gr.Blocks(title="YouTube Clip Finder", theme=gr.themes.Soft()) as app:
         download_status = gr.Textbox(label="Download Status", lines=8, interactive=False)
         download_files = gr.File(label="📦 Downloaded Clips (Download Now!)", file_count="multiple")
     
-    # Event handlers - CORRECTED
+    # Event handlers
     search_btn.click(
         fn=perform_search,
         inputs=[search_input],
