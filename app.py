@@ -111,23 +111,22 @@ def parse_timestamps(text):
     return clips
 
 def download_clip(video_url, start_time, end_time, output_name, quality, crop_vertical):
-    """Download a specific clip using yt_dlp Python API with cookies"""
+    """Download a specific clip - DIAGNOSTIC VERSION"""
     try:
         import yt_dlp
         
         output_path = os.path.join(OUTPUT_DIR, f"{output_name}.mp4")
         
-        # Build options
+        # SIMPLIFIED - Testing basic download first
         ydl_opts = {
-            'format': f'bestvideo[height<={quality}]+bestaudio/best[height<={quality}]',
+            'format': 'best[height<=720]',  # Simpler format selection
             'outtmpl': output_path,
-            'quiet': True,
-            'no_warnings': True,
-            'merge_output_format': 'mp4',
+            'verbose': True,  # Show what's happening
             'download_ranges': yt_dlp.utils.download_range_func(None, [(start_time, end_time)]),
+            'force_keyframes_at_cuts': True,  # Better timestamp cutting
         }
         
-        # Add cookies from environment variable
+        # Add cookies
         cookies_content = os.environ.get('YOUTUBE_COOKIES')
         if cookies_content:
             cookies_file = os.path.join(TEMP_DIR, 'cookies.txt')
@@ -135,23 +134,37 @@ def download_clip(video_url, start_time, end_time, output_name, quality, crop_ve
                 f.write(cookies_content)
             ydl_opts['cookiefile'] = cookies_file
         
-        # Add crop postprocessing if requested
+        # Crop only if enabled and basic download works
         if crop_vertical:
             ydl_opts['postprocessor_args'] = {
                 'ffmpeg': ['-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920']
             }
         
+        print(f"Downloading: {video_url}")
+        print(f"Time range: {start_time}s to {end_time}s")
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
         
+        # Check if file was created
         if os.path.exists(output_path):
-            return output_path, "✅ Downloaded"
-        else:
-            return None, "❌ Failed - file not created"
+            file_size = os.path.getsize(output_path)
+            return output_path, f"✅ Downloaded ({file_size // 1024}KB)"
+        
+        # Check for files with similar names
+        for filename in os.listdir(OUTPUT_DIR):
+            if output_name in filename:
+                full_path = os.path.join(OUTPUT_DIR, filename)
+                file_size = os.path.getsize(full_path)
+                return full_path, f"✅ Downloaded as {filename} ({file_size // 1024}KB)"
+        
+        return None, "❌ Failed - no output file created"
             
     except Exception as e:
-        return None, f"❌ Error: {str(e)[:100]}"
-
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"ERROR TRACE:\n{error_trace}")  # Shows in Render logs
+        return None, f"❌ Error: {str(e)}"
 # Global state
 search_results = []
 selected_video = None
