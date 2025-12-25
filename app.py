@@ -4,7 +4,6 @@ import os
 import json
 import tempfile
 import re
-import shutil
 from pathlib import Path
 
 # Create temp directory
@@ -119,7 +118,6 @@ def download_clip(video_url, start_time, end_time, output_name, quality, crop_ve
     try:
         output_path = os.path.join(OUTPUT_DIR, f"{output_name}.mp4")
         
-        # Base command
         cmd = [
             'yt-dlp',
             video_url,
@@ -131,7 +129,6 @@ def download_clip(video_url, start_time, end_time, output_name, quality, crop_ve
             '--quiet'
         ]
         
-        # Add crop if requested
         if crop_vertical:
             cmd.extend([
                 '--postprocessor-args',
@@ -159,26 +156,15 @@ def perform_search(query):
     global search_results
     
     if not query or query.strip() == "":
-        return (
-            "❌ Please enter a search query",
-            gr.update(visible=True, value=""),
-            gr.update(visible=False),
-            []
-        )
+        return "❌ Please enter a search query", gr.update(visible=False, value=[])
     
     videos, msg = search_youtube(query.strip())
     
     if videos is None:
-        return (
-            msg,
-            gr.update(visible=True, value=""),
-            gr.update(visible=False),
-            []
-        )
+        return msg, gr.update(visible=False, value=[])
     
     search_results = videos
     
-    # Create results display
     results_data = []
     for i, video in enumerate(videos):
         duration = format_duration(video['duration'])
@@ -191,19 +177,14 @@ def perform_search(query):
             video['uploader']
         ])
     
-    return (
-        msg,
-        gr.update(visible=False),
-        gr.update(visible=True),
-        results_data
-    )
+    return msg, gr.update(visible=True, value=results_data)
 
 def select_video_handler(evt: gr.SelectData):
     """Handle video selection from table"""
     global selected_video, search_results
     
     try:
-        index = evt.index[0]  # Get row index
+        index = evt.index[0]
         if 0 <= index < len(search_results):
             selected_video = search_results[index]
             
@@ -222,12 +203,7 @@ def select_video_handler(evt: gr.SelectData):
 Format: `2:30-3:15` (one per line)
 """
             
-            return (
-                info,
-                gr.update(visible=False),
-                gr.update(visible=True),
-                ""
-            )
+            return info, gr.update(visible=False), gr.update(visible=True), ""
     except Exception as e:
         print(f"Selection error: {e}")
     
@@ -246,13 +222,11 @@ def process_download(timestamps_text, clip_name_prefix, quality, crop_vertical):
     if not clip_name_prefix or clip_name_prefix.strip() == "":
         clip_name_prefix = "clip"
     
-    # Parse timestamps
     clips = parse_timestamps(timestamps_text)
     
     if not clips:
         return "❌ No valid timestamps. Use format: 2:30-3:15 (one per line)", []
     
-    # Download each clip
     status_lines = [f"🎬 Processing {len(clips)} clips from:\n{selected_video['title']}\n"]
     downloaded_files = []
     
@@ -344,11 +318,11 @@ with gr.Blocks(title="YouTube Clip Finder", theme=gr.themes.Soft()) as app:
         download_status = gr.Textbox(label="Download Status", lines=8, interactive=False)
         download_files = gr.File(label="📦 Downloaded Clips (Download Now!)", file_count="multiple")
     
-    # Event handlers
+    # Event handlers - CORRECTED
     search_btn.click(
         fn=perform_search,
         inputs=[search_input],
-        outputs=[search_status, search_page, results_table, results_table]
+        outputs=[search_status, results_table]
     )
     
     results_table.select(
