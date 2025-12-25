@@ -9,7 +9,7 @@ OUTPUT_DIR = os.path.join(TEMP_DIR, "downloads")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def search_youtube(query, max_results=15):
-    """Search YouTube using yt_dlp Python API"""
+    """Search YouTube using yt_dlp Python API with cookies"""
     try:
         import yt_dlp
         
@@ -19,6 +19,14 @@ def search_youtube(query, max_results=15):
             'extract_flat': True,
             'skip_download': True,
         }
+        
+        # Add cookies from environment variable
+        cookies_content = os.environ.get('YOUTUBE_COOKIES')
+        if cookies_content:
+            cookies_file = os.path.join(TEMP_DIR, 'cookies.txt')
+            with open(cookies_file, 'w') as f:
+                f.write(cookies_content)
+            ydl_opts['cookiefile'] = cookies_file
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             search_result = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
@@ -103,7 +111,7 @@ def parse_timestamps(text):
     return clips
 
 def download_clip(video_url, start_time, end_time, output_name, quality, crop_vertical):
-    """Download a specific clip using yt_dlp Python API"""
+    """Download a specific clip using yt_dlp Python API with cookies"""
     try:
         import yt_dlp
         
@@ -118,6 +126,14 @@ def download_clip(video_url, start_time, end_time, output_name, quality, crop_ve
             'merge_output_format': 'mp4',
             'download_ranges': yt_dlp.utils.download_range_func(None, [(start_time, end_time)]),
         }
+        
+        # Add cookies from environment variable
+        cookies_content = os.environ.get('YOUTUBE_COOKIES')
+        if cookies_content:
+            cookies_file = os.path.join(TEMP_DIR, 'cookies.txt')
+            with open(cookies_file, 'w') as f:
+                f.write(cookies_content)
+            ydl_opts['cookiefile'] = cookies_file
         
         # Add crop postprocessing if requested
         if crop_vertical:
@@ -177,7 +193,6 @@ def select_video_handler(evt: gr.SelectData):
         if 0 <= index < len(search_results):
             selected_video = search_results[index]
             
-            # Build full YouTube URL
             video_id = selected_video.get('id', '')
             full_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else selected_video.get('url', '')
             selected_video['url'] = full_url
@@ -257,6 +272,8 @@ with gr.Blocks(title="YouTube Clip Finder", theme=gr.themes.Soft()) as app:
     gr.Markdown("""
     # 🎬 YouTube Clip Finder & Downloader
     ### Search YouTube → Select Video → Enter Timestamps → Download Clips
+    
+    ⚠️ **Setup Required:** Add your YouTube cookies as environment variable `YOUTUBE_COOKIES` to bypass bot detection.
     """)
     
     with gr.Column(visible=True) as search_page:
