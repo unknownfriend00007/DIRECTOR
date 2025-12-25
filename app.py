@@ -245,8 +245,8 @@ def process_download(timestamps_text, clip_name_prefix, quality, crop_vertical):
         
         file_path, msg = download_clip(
             selected_video['url'],
-            clip['start'],
-            clip['end'],
+            clip['start_sec'],  # ✅ FIXED - now using seconds (int)
+            clip['end_sec'],    # ✅ FIXED - now using seconds (int)
             clip_filename,
             quality,
             crop_vertical
