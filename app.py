@@ -127,16 +127,15 @@ def parse_timestamps(text):
     logger.info(f"Total clips parsed: {len(clips)}")
     return clips
 
-def download_clip_hybrid(video_url, start_time, end_time, output_name, quality, crop_vertical):
+def download_clip_ultrafast(video_url, start_time, end_time, output_name, quality, crop_vertical):
     """
-    HYBRID METHOD: Fast download + precise trim
-    - Downloads with 5-second padding using stream copy (FAST)
-    - Trims to exact timestamps using FFmpeg (ACCURATE)
-    - 3-5x faster than full re-encode
-    - 95% accuracy (±0.1-0.5 seconds)
+    ULTRA FAST METHOD: Stream copy only
+    - Downloads segment with yt-dlp
+    - Trims with FFmpeg stream copy (no re-encoding)
+    - 10-15x faster but ±1-2 second accuracy
     """
     logger.info(f"\n{'='*80}")
-    logger.info(f"=== HYBRID DOWNLOAD STARTED ===")
+    logger.info(f"=== ULTRA FAST DOWNLOAD STARTED ===")
     logger.info(f"{'='*80}")
     logger.info(f"Video URL: {video_url}")
     logger.info(f"Start: {start_time}s, End: {end_time}s, Duration: {end_time - start_time}s")
@@ -144,25 +143,23 @@ def download_clip_hybrid(video_url, start_time, end_time, output_name, quality, 
     try:
         import yt_dlp
         
-        # Step 1: Download with padding using stream copy (FAST)
-        padding = 5
+        # Download larger segment with stream copy
+        padding = 10
         padded_start = max(0, start_time - padding)
         padded_end = end_time + padding
         
         temp_path = os.path.join(OUTPUT_DIR, f"temp_{output_name}.mp4")
         final_path = os.path.join(OUTPUT_DIR, f"{output_name}.mp4")
         
-        logger.info(f"⚡ STEP 1: Fast download with {padding}s padding ({padded_start}s-{padded_end}s)")
+        logger.info(f"⚡⚡ STEP 1: Fast download {padded_start}s-{padded_end}s")
         
         ydl_opts = {
-            'format': f'best[height<={quality}]/best',
+            'format': f'best[height<={quality}][ext=mp4]/best[ext=mp4]/best',
             'outtmpl': temp_path,
             'download_ranges': yt_dlp.utils.download_range_func(None, [(padded_start, padded_end)]),
             'force_keyframes_at_cuts': True,
-            'postprocessor_args': {
-                'ffmpeg': ['-c', 'copy']  # Stream copy = FAST!
-            },
-            'verbose': False,
+            'postprocessor_args': ['-c', 'copy'],
+            'quiet': True,
         }
         
         # Add cookies
@@ -177,27 +174,129 @@ def download_clip_hybrid(video_url, start_time, end_time, output_name, quality, 
             ydl.download([video_url])
         
         if not os.path.exists(temp_path):
-            raise Exception("Temporary download failed")
+            raise Exception("Download failed")
         
-        logger.info(f"✅ Step 1 complete: {os.path.getsize(temp_path)} bytes")
+        logger.info(f"✅ Downloaded: {os.path.getsize(temp_path)} bytes")
         
-        # Step 2: Precise trim to exact timestamps
-        logger.info(f"🎯 STEP 2: Precise trimming to exact timestamps")
+        # Step 2: Stream copy trim (FAST - no re-encoding)
+        logger.info(f"⚡⚡ STEP 2: Stream copy trim (no re-encode)")
         
         trim_start = start_time - padded_start
         trim_duration = end_time - start_time
         
-        # Build FFmpeg command
         ffmpeg_cmd = [
             'ffmpeg',
-            '-i', temp_path,
             '-ss', str(trim_start),
+            '-i', temp_path,
             '-t', str(trim_duration),
-            '-c:v', 'libx264',
-            '-preset', 'ultrafast',
-            '-crf', '18',
-            '-c:a', 'aac',
-            '-b:a', '192k',
+            '-c', 'copy',  # PURE STREAM COPY!
+            '-avoid_negative_ts', 'make_zero',
+            '-y',
+            final_path
+        ]
+        
+        if crop_vertical:
+            logger.warning("⚠️ Crop not available in Ultra Fast mode (requires re-encoding)")
+        
+        logger.info(f"Running: {' '.join(ffmpeg_cmd[:10])}...")
+        
+        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=120)
+        
+        if result.returncode != 0:
+            logger.error(f"FFmpeg error: {result.stderr[:300]}")
+            raise Exception(f"FFmpeg failed: {result.stderr[:150]}")
+        
+        # Clean up
+        os.remove(temp_path)
+        
+        if os.path.exists(final_path):
+            file_size = os.path.getsize(final_path)
+            logger.info(f"✅ ULTRA FAST SUCCESS: {file_size} bytes")
+            return final_path, f"✅ Downloaded (Ultra Fast, {file_size // 1024}KB)"
+        
+        raise Exception("Output file not created")
+        
+    except Exception as e:
+        logger.error(f"❌ Ultra fast failed: {str(e)}", exc_info=True)
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+        return None, f"❌ Error: {str(e)}"
+
+def download_clip_hybrid(video_url, start_time, end_time, output_name, quality, crop_vertical):
+    """
+    TRUE HYBRID METHOD: Fast download + precise re-encode
+    - Downloads segment with yt-dlp (any format, fast)
+    - Re-encodes ONLY the exact clip with FFmpeg
+    - 3-5x faster than full yt-dlp re-encode
+    - 100% accurate timestamps
+    """
+    logger.info(f"\n{'='*80}")
+    logger.info(f"=== TRUE HYBRID DOWNLOAD STARTED ===")
+    logger.info(f"{'='*80}")
+    logger.info(f"Video URL: {video_url}")
+    logger.info(f"Start: {start_time}s, End: {end_time}s, Duration: {end_time - start_time}s")
+    
+    try:
+        import yt_dlp
+        
+        # Step 1: Download larger segment (any method, doesn't matter)
+        padding = 10
+        padded_start = max(0, start_time - padding)
+        padded_end = end_time + padding
+        
+        temp_path = os.path.join(OUTPUT_DIR, f"temp_{output_name}.mp4")
+        final_path = os.path.join(OUTPUT_DIR, f"{output_name}.mp4")
+        
+        logger.info(f"⚡ STEP 1: Downloading segment {padded_start}s-{padded_end}s")
+        
+        ydl_opts = {
+            'format': f'best[height<={quality}][ext=mp4]/best[ext=mp4]/best',
+            'outtmpl': temp_path,
+            'download_ranges': yt_dlp.utils.download_range_func(None, [(padded_start, padded_end)]),
+            'force_keyframes_at_cuts': True,
+            'postprocessor_args': ['-c', 'copy'],  # Try stream copy for speed
+            'quiet': True,
+        }
+        
+        # Add cookies
+        cookies_content = os.environ.get('YOUTUBE_COOKIES')
+        if cookies_content:
+            cookies_file = os.path.join(TEMP_DIR, 'cookies.txt')
+            with open(cookies_file, 'w') as f:
+                f.write(cookies_content)
+            ydl_opts['cookiefile'] = cookies_file
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
+        
+        if not os.path.exists(temp_path):
+            raise Exception("Download failed")
+        
+        temp_size = os.path.getsize(temp_path)
+        logger.info(f"✅ Downloaded: {temp_size} bytes")
+        
+        # Step 2: Precise re-encode of ONLY the target clip
+        logger.info(f"🎯 STEP 2: Re-encoding exact clip with FFmpeg")
+        
+        trim_start = start_time - padded_start
+        trim_duration = end_time - start_time
+        
+        logger.info(f"Trimming: start={trim_start}s, duration={trim_duration}s")
+        
+        # Build FFmpeg command for precise re-encode
+        ffmpeg_cmd = [
+            'ffmpeg',
+            '-ss', str(trim_start),        # Input seeking (fast)
+            '-i', temp_path,
+            '-t', str(trim_duration),      # Exact duration
+            '-c:v', 'libx264',             # Re-encode video
+            '-preset', 'ultrafast',        # Fastest preset
+            '-crf', '23',                  # Good quality
+            '-c:a', 'aac',                 # Re-encode audio
+            '-b:a', '128k',
         ]
         
         # Add crop if requested
@@ -213,37 +312,49 @@ def download_clip_hybrid(video_url, start_time, end_time, output_name, quality, 
             final_path
         ])
         
-        logger.info(f"FFmpeg command: {' '.join(ffmpeg_cmd)}")
+        logger.info(f"Running FFmpeg: {' '.join(ffmpeg_cmd[:12])}...")
         
-        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+        result = subprocess.run(
+            ffmpeg_cmd,
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minute timeout
+        )
         
         if result.returncode != 0:
-            logger.error(f"FFmpeg error: {result.stderr}")
-            raise Exception(f"FFmpeg trim failed: {result.stderr[:200]}")
+            logger.error(f"FFmpeg stderr: {result.stderr[:500]}")
+            raise Exception(f"FFmpeg failed: {result.stderr[:200]}")
         
         # Clean up temp file
         os.remove(temp_path)
+        logger.info("Temp file cleaned")
         
         if os.path.exists(final_path):
             file_size = os.path.getsize(final_path)
-            logger.info(f"✅ HYBRID SUCCESS: {final_path} ({file_size} bytes)")
+            logger.info(f"✅ HYBRID SUCCESS: {file_size} bytes")
             return final_path, f"✅ Downloaded (Hybrid, {file_size // 1024}KB)"
         
-        raise Exception("Final output file not created")
+        raise Exception("Output file not created")
+        
+    except subprocess.TimeoutExpired:
+        logger.error("FFmpeg timeout")
+        return None, "❌ Timeout - try shorter clip or Ultra Fast mode"
         
     except Exception as e:
-        logger.error(f"❌ Hybrid download failed: {str(e)}", exc_info=True)
-        # Clean up temp file if exists
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        logger.error(f"❌ Hybrid failed: {str(e)}", exc_info=True)
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
         return None, f"❌ Error: {str(e)}"
 
 def download_clip_accurate(video_url, start_time, end_time, output_name, quality, crop_vertical):
     """
-    ACCURATE METHOD: Full re-encode (original method)
-    - Direct download with re-encoding
+    ACCURATE METHOD: Full yt-dlp re-encode (original method)
+    - Direct download with yt-dlp handling everything
     - Exact timestamps guaranteed
-    - Slower but 100% accurate
+    - Slowest but most reliable
     """
     logger.info(f"\n{'='*80}")
     logger.info(f"=== ACCURATE DOWNLOAD STARTED ===")
@@ -310,11 +421,13 @@ def download_clip_accurate(video_url, start_time, end_time, output_name, quality
 
 def download_clip(video_url, start_time, end_time, output_name, quality, crop_vertical, processing_mode):
     """
-    Universal download function - routes to hybrid or accurate method
+    Universal download function - routes to correct method
     """
-    if processing_mode == "⚡ Hybrid (Fast + Accurate) - RECOMMENDED":
+    if "Ultra Fast" in processing_mode:
+        return download_clip_ultrafast(video_url, start_time, end_time, output_name, quality, crop_vertical)
+    elif "Hybrid" in processing_mode:
         return download_clip_hybrid(video_url, start_time, end_time, output_name, quality, crop_vertical)
-    else:  # "🎯 Full Re-encode (Slower, Exact)"
+    else:  # Full Re-encode
         return download_clip_accurate(video_url, start_time, end_time, output_name, quality, crop_vertical)
 
 # Global state
@@ -423,7 +536,14 @@ def process_download(timestamps_text, clip_name_prefix, quality, crop_vertical, 
         logger.warning("No valid timestamps parsed")
         return "❌ No valid timestamps. Use format: 2:30-3:15 (one per line)", []
     
-    mode_emoji = "⚡" if "Hybrid" in processing_mode else "🎯"
+    # Set emoji based on mode
+    if "Ultra Fast" in processing_mode:
+        mode_emoji = "⚡⚡"
+    elif "Hybrid" in processing_mode:
+        mode_emoji = "⚡"
+    else:
+        mode_emoji = "🎯"
+    
     status_lines = [f"{mode_emoji} Processing {len(clips)} clips using {processing_mode}"]
     status_lines.append(f"📹 Video: {selected_video['title']}\n")
     downloaded_files = []
@@ -519,18 +639,22 @@ with gr.Blocks(title="YouTube Clip Finder", theme=gr.themes.Soft()) as app:
                 label="Quality"
             )
         
-        # NEW: Processing mode selector
+        # THREE PROCESSING MODES
         processing_mode = gr.Radio(
             choices=[
-                "⚡ Hybrid (Fast + Accurate) - RECOMMENDED",
-                "🎯 Full Re-encode (Slower, Exact)"
+                "⚡⚡ Ultra Fast (30-60 sec, ±1-2s accuracy)",
+                "⚡ Hybrid (1-2 min, exact timestamps) - RECOMMENDED",
+                "🎯 Full Re-encode (5+ min, exact, slower)"
             ],
-            value="⚡ Hybrid (Fast + Accurate) - RECOMMENDED",
+            value="⚡ Hybrid (1-2 min, exact timestamps) - RECOMMENDED",
             label="Processing Mode",
-            info="Hybrid: 2-3min, ±0.5s accuracy | Full Re-encode: 4-5min, exact timestamps"
+            info="Ultra Fast: Stream copy only | Hybrid: Fast download + precise FFmpeg trim | Full: yt-dlp handles everything"
         )
         
-        crop_checkbox = gr.Checkbox(label="✅ Crop to 9:16 Vertical", value=False)
+        crop_checkbox = gr.Checkbox(
+            label="✅ Crop to 9:16 Vertical (Not available in Ultra Fast mode)", 
+            value=False
+        )
         
         download_btn = gr.Button("📥 DOWNLOAD CLIPS", variant="primary", size="lg")
         
@@ -567,18 +691,21 @@ with gr.Blocks(title="YouTube Clip Finder", theme=gr.themes.Soft()) as app:
     - **Multiple clips:** Enter one per line
     - **Quality:** 720p recommended (good balance)
     - **Processing Mode:**
-      - **⚡ Hybrid:** 2-3 minutes, ±0.5 second accuracy (RECOMMENDED)
-      - **🎯 Full Re-encode:** 4-5 minutes, exact timestamps
-    - **Vertical crop:** Enable for TikTok/Instagram Reels/YouTube Shorts
+      - **⚡⚡ Ultra Fast:** 30-60 seconds, stream copy only, ±1-2 second accuracy, no crop support
+      - **⚡ Hybrid (RECOMMENDED):** 1-2 minutes, exact timestamps, supports crop, best balance
+      - **🎯 Full Re-encode:** 5+ minutes, exact timestamps, most reliable but slowest
+    - **Vertical crop:** Enable for TikTok/Instagram Reels/YouTube Shorts (not in Ultra Fast mode)
     - **Check Render logs** if downloads fail (Dashboard → Logs tab)
+    - **MADE BY Raghav
     
     ### 📊 Mode Comparison:
-    | Feature | Hybrid ⚡ | Full Re-encode 🎯 |
-    |---------|----------|------------------|
-    | **Speed** | 2-3 min | 4-5 min |
-    | **Accuracy** | ±0.5 sec | Exact |
-    | **Quality** | Original | Slightly compressed |
-    | **Best for** | Most clips | Precise editing |
+    | Feature | Ultra Fast ⚡⚡ | Hybrid ⚡ (RECOMMENDED) | Full Re-encode 🎯 |
+    |---------|---------------|------------------------|-------------------|
+    | **Speed** | 30-60 sec | 1-2 min | 5+ min |
+    | **Accuracy** | ±1-2 sec | Exact | Exact |
+    | **Quality** | Original | High | High |
+    | **Crop Support** | ❌ No | ✅ Yes | ✅ Yes |
+    | **Best for** | Quick previews | Most use cases | Maximum reliability |
     """)
 
 if __name__ == "__main__":
