@@ -127,15 +127,15 @@ def parse_timestamps(text):
     logger.info(f"Total clips parsed: {len(clips)}")
     return clips
 
-def download_clip_simple(video_url, start_time, end_time, output_name, quality, crop_vertical):
+def download_clip_fast(video_url, start_time, end_time, output_name, quality, crop_vertical):
     """
-    SIMPLE RELIABLE METHOD: Extract direct URL → FFmpeg trim
-    - Get video URL with yt-dlp (NO download)
-    - Use FFmpeg to download + trim in one step
-    - Fast and reliable
+    FAST METHOD: Stream copy (no re-encoding)
+    - 30-60 seconds for most clips
+    - ±2-4 second accuracy (cuts at keyframes only)
+    - Original quality (no compression)
     """
     logger.info(f"\n{'='*80}")
-    logger.info(f"=== SIMPLE DOWNLOAD STARTED ===")
+    logger.info(f"=== FAST MODE DOWNLOAD STARTED ===")
     logger.info(f"{'='*80}")
     logger.info(f"Video URL: {video_url}")
     logger.info(f"Start: {start_time}s, End: {end_time}s, Duration: {end_time - start_time}s")
@@ -169,40 +169,125 @@ def download_clip_simple(video_url, start_time, end_time, output_name, quality, 
         
         logger.info(f"✅ Got direct URL")
         
-        # Step 2: FFmpeg download + trim in ONE step
-        logger.info(f"🎯 STEP 2: FFmpeg download + trim...")
+        # Step 2: FFmpeg FAST stream copy
+        logger.info(f"⚡⚡ STEP 2: Fast stream copy (no re-encoding)...")
+        
+        if crop_vertical:
+            logger.warning("⚠️ Crop requires re-encoding - switching to precise mode")
+            return download_clip_precise(video_url, start_time, end_time, output_name, quality, crop_vertical)
         
         ffmpeg_cmd = [
             'ffmpeg',
-            '-ss', str(start_time),      # Seek to start
+            '-ss', str(start_time),      # Fast seek
             '-i', direct_url,             # Input URL
             '-t', str(duration),          # Duration
-            '-c:v', 'copy',               # Stream copy video (FAST!)
-            '-c:a', 'copy',               # Stream copy audio (FAST!)
+            '-c', 'copy',                 # STREAM COPY (FAST!)
             '-avoid_negative_ts', 'make_zero',
             '-y',
             final_path
         ]
         
-        if crop_vertical:
-            logger.info("⚠️ Crop requires re-encoding, switching to encode mode...")
-            ffmpeg_cmd = [
-                'ffmpeg',
-                '-ss', str(start_time),
-                '-i', direct_url,
-                '-t', str(duration),
-                '-c:v', 'libx264',        # Re-encode for crop
-                '-preset', 'ultrafast',
-                '-crf', '23',
-                '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920',
-                '-c:a', 'aac',
-                '-b:a', '128k',
-                '-avoid_negative_ts', 'make_zero',
-                '-y',
-                final_path
-            ]
+        logger.info(f"Running FFmpeg stream copy...")
         
-        logger.info(f"Running FFmpeg...")
+        result = subprocess.run(
+            ffmpeg_cmd,
+            capture_output=True,
+            text=True,
+            timeout=180  # 3 minute timeout
+        )
+        
+        if result.returncode != 0:
+            logger.error(f"FFmpeg error: {result.stderr[:500]}")
+            raise Exception(f"FFmpeg failed: {result.stderr[:200]}")
+        
+        logger.info("FFmpeg complete")
+        
+        if os.path.exists(final_path):
+            file_size = os.path.getsize(final_path)
+            logger.info(f"✅ FAST SUCCESS: {file_size} bytes")
+            return final_path, f"✅ Downloaded (Fast, {file_size // 1024}KB, ±2s accuracy)"
+        
+        raise Exception("Output file not created")
+        
+    except subprocess.TimeoutExpired:
+        logger.error("FFmpeg timeout!")
+        return None, "❌ Timeout - clip too long"
+        
+    except Exception as e:
+        logger.error(f"❌ Fast download failed: {str(e)}", exc_info=True)
+        return None, f"❌ Error: {str(e)[:150]}"
+
+def download_clip_precise(video_url, start_time, end_time, output_name, quality, crop_vertical):
+    """
+    PRECISE METHOD: Re-encode for exact timestamps
+    - 1-2 minutes for most clips
+    - Exact timestamps (frame-accurate)
+    - Slightly compressed (but high quality)
+    """
+    logger.info(f"\n{'='*80}")
+    logger.info(f"=== PRECISE MODE DOWNLOAD STARTED ===")
+    logger.info(f"{'='*80}")
+    logger.info(f"Video URL: {video_url}")
+    logger.info(f"Start: {start_time}s, End: {end_time}s, Duration: {end_time - start_time}s")
+    
+    try:
+        import yt_dlp
+        
+        final_path = os.path.join(OUTPUT_DIR, f"{output_name}.mp4")
+        duration = end_time - start_time
+        
+        # Step 1: Get direct video URL (NO download)
+        logger.info(f"⚡ STEP 1: Getting direct video URL...")
+        
+        ydl_opts = {
+            'format': f'best[height<={quality}][ext=mp4]/best[ext=mp4]/best',
+            'quiet': True,
+            'no_warnings': True,
+        }
+        
+        # Add cookies
+        cookies_content = os.environ.get('YOUTUBE_COOKIES')
+        if cookies_content:
+            cookies_file = os.path.join(TEMP_DIR, 'cookies.txt')
+            with open(cookies_file, 'w') as f:
+                f.write(cookies_content)
+            ydl_opts['cookiefile'] = cookies_file
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+            direct_url = info['url']
+        
+        logger.info(f"✅ Got direct URL")
+        
+        # Step 2: FFmpeg PRECISE re-encode
+        logger.info(f"🎯 STEP 2: Precise re-encode for exact timestamps...")
+        
+        ffmpeg_cmd = [
+            'ffmpeg',
+            '-ss', str(start_time),      # Input seeking (fast)
+            '-i', direct_url,             # Input URL
+            '-t', str(duration),          # Exact duration
+            '-c:v', 'libx264',            # Re-encode video
+            '-preset', 'ultrafast',       # Fastest encoding
+            '-crf', '23',                 # Good quality
+            '-c:a', 'aac',                # Re-encode audio
+            '-b:a', '128k',               # Audio bitrate
+        ]
+        
+        # Add crop if requested
+        if crop_vertical:
+            logger.info("Adding 9:16 vertical crop")
+            ffmpeg_cmd.extend([
+                '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920'
+            ])
+        
+        ffmpeg_cmd.extend([
+            '-avoid_negative_ts', 'make_zero',
+            '-y',
+            final_path
+        ])
+        
+        logger.info(f"Running FFmpeg precise re-encode...")
         
         result = subprocess.run(
             ffmpeg_cmd,
@@ -219,8 +304,8 @@ def download_clip_simple(video_url, start_time, end_time, output_name, quality, 
         
         if os.path.exists(final_path):
             file_size = os.path.getsize(final_path)
-            logger.info(f"✅ SUCCESS: {file_size} bytes")
-            return final_path, f"✅ Downloaded ({file_size // 1024}KB)"
+            logger.info(f"✅ PRECISE SUCCESS: {file_size} bytes")
+            return final_path, f"✅ Downloaded (Precise, {file_size // 1024}KB, exact timestamps)"
         
         raise Exception("Output file not created")
         
@@ -229,14 +314,17 @@ def download_clip_simple(video_url, start_time, end_time, output_name, quality, 
         return None, "❌ Timeout - clip too long"
         
     except Exception as e:
-        logger.error(f"❌ Download failed: {str(e)}", exc_info=True)
+        logger.error(f"❌ Precise download failed: {str(e)}", exc_info=True)
         return None, f"❌ Error: {str(e)[:150]}"
 
-def download_clip(video_url, start_time, end_time, output_name, quality, crop_vertical, processing_mode):
+def download_clip(video_url, start_time, end_time, output_name, quality, crop_vertical, precise_mode):
     """
-    Universal download function - only one method now
+    Universal download function - routes to fast or precise method
     """
-    return download_clip_simple(video_url, start_time, end_time, output_name, quality, crop_vertical)
+    if precise_mode:
+        return download_clip_precise(video_url, start_time, end_time, output_name, quality, crop_vertical)
+    else:
+        return download_clip_fast(video_url, start_time, end_time, output_name, quality, crop_vertical)
 
 # Global state
 search_results = []
@@ -311,7 +399,7 @@ Format: `2:30-3:15` (one per line)
     
     return "❌ Selection failed", gr.update(visible=True), gr.update(visible=False), ""
 
-def process_download(timestamps_text, clip_name_prefix, quality, crop_vertical):
+def process_download(timestamps_text, clip_name_prefix, quality, crop_vertical, precise_mode):
     """Process and download all clips"""
     global selected_video
     
@@ -323,8 +411,11 @@ def process_download(timestamps_text, clip_name_prefix, quality, crop_vertical):
         logger.warning("No video selected")
         return "❌ No video selected", []
     
+    mode_name = "Precise Mode 🎯" if precise_mode else "Fast Mode ⚡"
+    
     logger.info(f"Video: {selected_video['title']}")
     logger.info(f"URL: {selected_video['url']}")
+    logger.info(f"Mode: {mode_name}")
     
     if not timestamps_text or timestamps_text.strip() == "":
         logger.warning("No timestamps provided")
@@ -343,7 +434,8 @@ def process_download(timestamps_text, clip_name_prefix, quality, crop_vertical):
         logger.warning("No valid timestamps parsed")
         return "❌ No valid timestamps. Use format: 2:30-3:15 (one per line)", []
     
-    status_lines = [f"⚡ Processing {len(clips)} clips"]
+    mode_emoji = "🎯" if precise_mode else "⚡"
+    status_lines = [f"{mode_emoji} Processing {len(clips)} clips using {mode_name}"]
     status_lines.append(f"📹 Video: {selected_video['title']}\n")
     downloaded_files = []
     
@@ -360,7 +452,7 @@ def process_download(timestamps_text, clip_name_prefix, quality, crop_vertical):
             clip_filename,
             quality,
             crop_vertical,
-            None  # Not used anymore
+            precise_mode
         )
         
         status_lines.append(f"   {msg}")
@@ -438,8 +530,21 @@ with gr.Blocks(title="YouTube Clip Finder", theme=gr.themes.Soft()) as app:
                 label="Quality"
             )
         
+        # PROCESSING MODE SELECTOR
+        gr.Markdown("### ⚙️ Processing Options")
+        
+        precise_mode = gr.Radio(
+            choices=[
+                ("⚡ Fast Mode (30-60 sec, ±2s accuracy)", False),
+                ("🎯 Precise Mode (1-2 min, exact timestamps)", True)
+            ],
+            value=True,
+            label="Processing Mode",
+            info="Fast: Stream copy (quick but ±2s) | Precise: Re-encode (slower but exact)"
+        )
+        
         crop_checkbox = gr.Checkbox(
-            label="✅ Crop to 9:16 Vertical (slower, re-encodes)", 
+            label="✅ Crop to 9:16 Vertical (requires Precise mode)", 
             value=False
         )
         
@@ -467,7 +572,7 @@ with gr.Blocks(title="YouTube Clip Finder", theme=gr.themes.Soft()) as app:
     
     download_btn.click(
         fn=process_download,
-        inputs=[timestamps_input, clip_name, quality_select, crop_checkbox],
+        inputs=[timestamps_input, clip_name, quality_select, crop_checkbox, precise_mode],
         outputs=[download_status, download_files]
     )
     
@@ -477,8 +582,16 @@ with gr.Blocks(title="YouTube Clip Finder", theme=gr.themes.Soft()) as app:
     - **Timestamp format:** Use `2:30-3:15` (minutes:seconds)
     - **Multiple clips:** Enter one per line
     - **Quality:** 480p recommended for speed
-    - **Vertical crop:** Requires re-encoding (slower but accurate)
-    - **Speed:** ~30-60 seconds per clip (without crop)
+    
+    ### ⚡🎯 Mode Comparison:
+    | Feature | Fast Mode ⚡ | Precise Mode 🎯 |
+    |---------|-------------|-----------------|
+    | **Speed** | 30-60 sec | 1-2 min |
+    | **Accuracy** | ±2-4 sec | Exact |
+    | **Quality** | Original | High (slightly compressed) |
+    | **Crop Support** | ❌ No | ✅ Yes |
+    | **Best for** | Quick previews | Final edits |
+    
     - **Check Render logs** if downloads fail (Dashboard → Logs tab)
     """)
 
