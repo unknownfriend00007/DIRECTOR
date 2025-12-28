@@ -207,13 +207,13 @@ def generate_preview(video_url, start_time, end_time, preview_name, quality='480
         if os.path.exists(preview_path):
             file_size = os.path.getsize(preview_path)
             logger.info(f"✅ PREVIEW SUCCESS: {file_size} bytes")
-            return preview_path, buffer_start, buffer_end, "✅ Preview ready"
+            return preview_path, buffer_start, buffer_end, buffer_duration, "✅ Preview ready"
         
         raise Exception("Preview file not created")
         
     except Exception as e:
         logger.error(f"❌ Preview failed: {str(e)}", exc_info=True)
-        return None, 0, 0, f"❌ Preview error: {str(e)[:150]}"
+        return None, 0, 0, 0, f"❌ Preview error: {str(e)[:150]}"
 
 def download_clip_fast(video_url, start_time, end_time, output_name, quality, crop_vertical):
     """
@@ -399,9 +399,9 @@ def download_clip_precise(video_url, start_time, end_time, output_name, quality,
         logger.error(f"❌ Precise download failed: {str(e)}", exc_info=True)
         return None, f"❌ Error: {str(e)[:150]}"
 
-def trim_preview_video(preview_path, buffer_start, trim_start, trim_end, output_name, crop_vertical):
+def trim_preview_video(preview_path, trim_start_relative, trim_end_relative, output_name, crop_vertical):
     """
-    Trim the preview video based on user adjustments
+    Trim the preview video based on RELATIVE user adjustments
     """
     logger.info(f"\n{'='*80}")
     logger.info(f"=== TRIMMING PREVIEW ===")
@@ -410,15 +410,14 @@ def trim_preview_video(preview_path, buffer_start, trim_start, trim_end, output_
     try:
         final_path = os.path.join(OUTPUT_DIR, f"{output_name}.mp4")
         
-        # Calculate relative timestamps from preview
-        relative_start = trim_start - buffer_start
-        duration = trim_end - trim_start
+        # Calculate duration from relative timestamps
+        duration = trim_end_relative - trim_start_relative
         
-        logger.info(f"Trimming preview: start={relative_start}s, duration={duration}s")
+        logger.info(f"Trimming preview: start={trim_start_relative}s (relative), duration={duration}s")
         
         ffmpeg_cmd = [
             'ffmpeg',
-            '-ss', str(relative_start),
+            '-ss', str(trim_start_relative),
             '-i', preview_path,
             '-t', str(duration),
             '-c:v', 'libx264',
@@ -479,6 +478,7 @@ selected_video = None
 current_preview_path = None
 current_buffer_start = 0
 current_buffer_end = 0
+current_clip_info = {}
 
 def perform_search(query):
     """Search and display results"""
@@ -550,24 +550,24 @@ Format: `2:30-3:15` (one per line)
     return "❌ Selection failed", gr.update(visible=True), gr.update(visible=False), ""
 
 def generate_preview_handler(timestamps_text, quality):
-    """Generate preview for first clip"""
-    global selected_video, current_preview_path, current_buffer_start, current_buffer_end
+    """Generate preview for first clip with RELATIVE timestamps"""
+    global selected_video, current_preview_path, current_buffer_start, current_buffer_end, current_clip_info
     
     if selected_video is None:
-        return None, "❌ No video selected", gr.update(visible=False)
+        return None, "❌ No video selected", gr.update(visible=False), gr.update(), gr.update(), ""
     
     if not timestamps_text or timestamps_text.strip() == "":
-        return None, "❌ Please enter timestamps", gr.update(visible=False)
+        return None, "❌ Please enter timestamps", gr.update(visible=False), gr.update(), gr.update(), ""
     
     clips = parse_timestamps(timestamps_text)
     
     if not clips:
-        return None, "❌ No valid timestamps", gr.update(visible=False)
+        return None, "❌ No valid timestamps", gr.update(visible=False), gr.update(), gr.update(), ""
     
     # Generate preview for first clip
     first_clip = clips[0]
     
-    preview_path, buffer_start, buffer_end, msg = generate_preview(
+    preview_path, buffer_start, buffer_end, preview_duration, msg = generate_preview(
         selected_video['url'],
         first_clip['start_sec'],
         first_clip['end_sec'],
@@ -580,17 +580,53 @@ def generate_preview_handler(timestamps_text, quality):
         current_buffer_start = buffer_start
         current_buffer_end = buffer_end
         
+        # Calculate RELATIVE timestamps (0 = start of preview)
+        original_start_relative = first_clip['start_sec'] - buffer_start  # e.g., 5s
+        original_end_relative = first_clip['end_sec'] - buffer_start      # e.g., 15s
+        
+        # Store clip info
+        current_clip_info = {
+            'original_start': first_clip['start'],
+            'original_end': first_clip['end'],
+            'start_relative': original_start_relative,
+            'end_relative': original_end_relative,
+            'preview_duration': preview_duration
+        }
+        
+        info_text = f"""✅ **Preview Ready!**
+
+📊 **Original timestamps:** {first_clip['start']} - {first_clip['end']} (from source video)
+🎬 **Preview duration:** {preview_duration:.1f} seconds (includes 5s buffer on each side)
+
+💡 **How to use:**
+1. Watch the preview video above
+2. Your clip starts at **{original_start_relative:.1f}s** and ends at **{original_end_relative:.1f}s** in the preview
+3. Adjust the sliders below to fine-tune (sliders show seconds from preview start)
+4. Click "Download" when satisfied
+
+⏱️ **Slider range:** 0s to {preview_duration:.1f}s (entire preview video)
+"""
+        
+        clip_info_text = f"📌 Current selection: {original_start_relative:.1f}s to {original_end_relative:.1f}s (Duration: {original_end_relative - original_start_relative:.1f}s)"
+        
         return (
             preview_path,
-            f"✅ Preview ready! Adjust timestamps below if needed.\nBuffer: {buffer_start}s - {buffer_end}s",
-            gr.update(visible=True, value=first_clip['start_sec'], minimum=buffer_start, maximum=buffer_end),
-            gr.update(visible=True, value=first_clip['end_sec'], minimum=buffer_start, maximum=buffer_end)
+            info_text,
+            gr.update(visible=True),
+            gr.update(value=original_start_relative, minimum=0, maximum=preview_duration, step=0.1),
+            gr.update(value=original_end_relative, minimum=0, maximum=preview_duration, step=0.1),
+            clip_info_text
         )
     
-    return None, msg, gr.update(visible=False), gr.update(visible=False)
+    return None, msg, gr.update(visible=False), gr.update(), gr.update(), ""
 
-def download_from_preview(clip_name, trim_start, trim_end, crop_vertical):
-    """Download using adjusted timestamps from preview"""
+def update_clip_info(start, end):
+    """Update the clip duration display"""
+    duration = end - start
+    return f"📌 Current selection: {start:.1f}s to {end:.1f}s (Duration: {duration:.1f}s / {format_duration(int(duration))})"
+
+def download_from_preview(clip_name, trim_start_relative, trim_end_relative, crop_vertical):
+    """Download using RELATIVE timestamps from preview"""
     global current_preview_path, current_buffer_start
     
     if current_preview_path is None:
@@ -599,17 +635,21 @@ def download_from_preview(clip_name, trim_start, trim_end, crop_vertical):
     if not os.path.exists(current_preview_path):
         return "❌ Preview file not found", []
     
+    if trim_start_relative >= trim_end_relative:
+        return "❌ Start time must be before end time", []
+    
+    logger.info(f"Downloading from preview: {trim_start_relative}s to {trim_end_relative}s (relative)")
+    
     file_path, msg = trim_preview_video(
         current_preview_path,
-        current_buffer_start,
-        trim_start,
-        trim_end,
-        clip_name,
+        trim_start_relative,
+        trim_end_relative,
+        clip_name if clip_name.strip() else "clip_1",
         crop_vertical
     )
     
     if file_path and os.path.exists(file_path):
-        return f"✅ Downloaded from preview!\n{msg}", [file_path]
+        return f"✅ Downloaded from preview!\n{msg}\n\n💡 Tip: Check the video before closing - files are deleted when session ends!", [file_path]
     
     return f"❌ Download failed: {msg}", []
 
@@ -746,34 +786,44 @@ with gr.Blocks(title="YouTube Clip Finder", theme=gr.themes.Soft()) as app:
         
         # PREVIEW & EDIT SECTION
         gr.Markdown("---")
-        gr.Markdown("### 🎬 Option 1: Preview & Edit (Recommended for Precision)")
+        gr.Markdown("### 🎬 Option 1: Preview & Edit (Recommended for Single Clip)")
         
         preview_btn = gr.Button("🎥 GENERATE PREVIEW (First Clip Only)", variant="secondary", size="lg")
-        preview_status = gr.Textbox(label="Preview Status", interactive=False, lines=2)
+        preview_status = gr.Markdown("Preview Status")
         
         with gr.Column(visible=False) as preview_editor:
-            preview_video = gr.Video(label="📹 Preview Video (with 5s buffer on each side)")
+            preview_video = gr.Video(label="📹 Preview Video (Watch First!)")
             
             gr.Markdown("### ✂️ Fine-Tune Timestamps")
+            gr.Markdown("**The sliders below show seconds from the START of the preview video (0 = preview start)**")
             
             with gr.Row():
                 trim_start_slider = gr.Slider(
-                    label="Start Time (seconds)",
+                    label="⏩ Start Time (seconds from preview start)",
                     minimum=0,
-                    maximum=300,
+                    maximum=30,
                     step=0.1,
-                    value=0
+                    value=5,
+                    interactive=True
                 )
                 trim_end_slider = gr.Slider(
-                    label="End Time (seconds)",
+                    label="⏸️ End Time (seconds from preview start)",
                     minimum=0,
-                    maximum=300,
+                    maximum=30,
                     step=0.1,
-                    value=10
+                    value=15,
+                    interactive=True
                 )
             
+            clip_duration_display = gr.Textbox(
+                label="📊 Current Selection",
+                interactive=False,
+                lines=1,
+                value="Clip info will appear here"
+            )
+            
             crop_checkbox_preview = gr.Checkbox(
-                label="✅ Crop to 9:16 Vertical", 
+                label="✅ Crop to 9:16 Vertical (for TikTok/Reels/Shorts)", 
                 value=False
             )
             
@@ -788,11 +838,11 @@ with gr.Blocks(title="YouTube Clip Finder", theme=gr.themes.Soft()) as app:
         precise_mode = gr.Radio(
             choices=[
                 ("⚡ Fast Mode (30-60 sec, ±2s accuracy)", False),
-                ("🎯 Precise Mode (2-3 min, exact timestamps)", True)
+                ("🎯 Precise Mode (2-3 min, exact timestamps, smaller files)", True)
             ],
             value=True,
             label="Processing Mode",
-            info="Fast: Stream copy (quick but ±2s) | Precise: Re-encode (slower but exact)"
+            info="Fast: Stream copy (quick but ±2s) | Precise: Re-encode (slower but exact + optimized file size)"
         )
         
         crop_checkbox = gr.Checkbox(
@@ -826,10 +876,20 @@ with gr.Blocks(title="YouTube Clip Finder", theme=gr.themes.Soft()) as app:
     preview_btn.click(
         fn=generate_preview_handler,
         inputs=[timestamps_input, quality_select],
-        outputs=[preview_video, preview_status, trim_start_slider, trim_end_slider]
-    ).then(
-        fn=lambda: gr.update(visible=True),
-        outputs=[preview_editor]
+        outputs=[preview_video, preview_status, preview_editor, trim_start_slider, trim_end_slider, clip_duration_display]
+    )
+    
+    # Update clip info when sliders change
+    trim_start_slider.change(
+        fn=update_clip_info,
+        inputs=[trim_start_slider, trim_end_slider],
+        outputs=[clip_duration_display]
+    )
+    
+    trim_end_slider.change(
+        fn=update_clip_info,
+        inputs=[trim_start_slider, trim_end_slider],
+        outputs=[clip_duration_display]
     )
     
     download_preview_btn.click(
@@ -847,34 +907,42 @@ with gr.Blocks(title="YouTube Clip Finder", theme=gr.themes.Soft()) as app:
     
     gr.Markdown("""
     ---
-    ### 💡 Tips:
-    - **Timestamp format:** Use `2:30-3:15` (minutes:seconds)
-    - **Multiple clips:** Enter one per line
-    - **Quality:** 480p recommended for speed
+    ### 💡 Tips & Guide:
+    
+    **Timestamp format:** Use `2:30-3:15` (minutes:seconds), one per line
     
     ### 🎬 Two Workflows:
     
-    **Option 1: Preview & Edit (⚡ Fast + 🎯 Precise)**
-    1. Click "Generate Preview" for first clip
-    2. Watch preview video
-    3. Adjust start/end sliders for exact timing
-    4. Download with perfect timestamps!
+    **🎯 Option 1: Preview & Edit (Recommended for Perfect Clips)**
+    1. Enter approximate timestamps (e.g., `2:30-3:15`)
+    2. Click "Generate Preview" → Get fast preview with 5s buffer
+    3. Watch the preview video
+    4. Adjust sliders (showing seconds from preview start, e.g., 5.2s to 15.8s)
+    5. Download with exact timestamps!
     
-    **Option 2: Direct Batch Download**
+    **⚡ Option 2: Direct Batch Download (For Multiple Clips)**
     - Download all clips at once
-    - Choose Fast (±2s) or Precise (exact) mode
-    - Good for multiple clips or when timestamps are already exact
+    - Choose Fast (±2s, ~30 MB) or Precise (exact, ~25-35 MB)
+    - Good when timestamps are already accurate
     
-    ### ⚡🎯 Mode Comparison:
+    ### 📊 Mode Comparison:
     | Feature | Fast Mode ⚡ | Precise Mode 🎯 | Preview & Edit 🎬 |
     |---------|-------------|-----------------|-------------------|
-    | **Speed** | 30-60 sec | 2-3 min | 45 sec + editing |
+    | **Speed** | 30-60 sec | 2-3 min | 45 sec preview + 2 min encode |
     | **File Size** | ~30 MB | ~25-35 MB | ~25-35 MB |
-    | **Accuracy** | ±2-4 sec | Exact | Exact (adjusted) |
-    | **Quality** | Original | High | High |
+    | **Accuracy** | ±2-4 sec | Exact | Exact (user-adjusted) |
+    | **Quality** | Original | High (CRF 26) | High (CRF 26) |
     | **Best for** | Quick previews | Batch precise | Single perfect clip |
     
-    - **Check Render logs** if downloads fail (Dashboard → Logs tab)
+    ### 🔧 Technical Details:
+    - **Fast Mode:** Stream copy (no re-encoding, keyframe-accurate)
+    - **Precise Mode:** Re-encodes with `fast` preset + CRF 26 (optimized compression)
+    - **Preview:** Fast stream copy with 5s buffer, then precise re-encode on download
+    - **Vertical Crop:** Scales to 1080x1920 (9:16 ratio) for TikTok/Reels/Shorts
+    
+    ⚠️ **Important:** All files are temporary and deleted when session ends. Download immediately!
+    
+    📝 **Check Render logs** if downloads fail (Dashboard → Logs tab)
     """)
 
 if __name__ == "__main__":
